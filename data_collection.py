@@ -1,71 +1,83 @@
+"""Utilities for scraping LottoMax results from lottomaxnumbers.com."""
+
 import result
 import requests
 from bs4 import BeautifulSoup
-from datetime import datetime, timedelta
+from datetime import datetime
 from os import system
 
-date = datetime(2009, 9, 25)
-end_date = datetime(2021, 6, 25)
-is_tuesday = False
+BASE_URL = "https://www.lottomaxnumbers.com"
+
 
 def clear():
-		system("clear")
+    """Clear the terminal screen."""
+    system("clear")
 
-def skip_days():
-	global date
-	global is_tuesday
-	if is_tuesday:
-		date = date + timedelta(days = 3)
-	else:
-		date = date + timedelta(days = 4)
-	is_tuesday = not is_tuesday
+
 	
-def get_soup(date):
-	url = "https://www.lottomaxnumbers.com/numbers/lotto-max-result-"
-	page = requests.get(url + date.strftime("%m-%d-%Y"))
-	soup = BeautifulSoup(page.content, 'html.parser')
-	if "404 Error" in str(soup.find().title):
-		return False
-	else:
-		return soup
+def get_soup(url: str) -> BeautifulSoup:
+    """Return BeautifulSoup object for the given URL."""
+    page = requests.get(url)
+    return BeautifulSoup(page.content, "html.parser")
 
 def get_result_from_balls(balls):
-	result = []
-	for ball in balls.find_all("li"):
-		result.append(int(ball.text.strip()))
-	return result
+    """Return a list of integers from a <ul class="balls"> element."""
+    result_list = []
+    for ball in balls.find_all("li"):
+        result_list.append(int(ball.text.strip()))
+    return result_list
 
-def scan():
-	clear()
-	while date <= end_date:
-			soup = get_soup(date)
-			saved_date = date.strftime("%Y-%m-%d")
-			skip_days()
-			if soup == False:
-				continue
-			else:
-				result_object = result.Result(saved_date)
 
-				big_div = soup.find(class_ = "results")
-				div = big_div.find(class_ = "balls")
-				ball_result = get_result_from_balls(div)
-				result_object.set_bonus(ball_result.pop())
-				result_object.set_winning_combo(ball_result)
+def get_extra(draw_soup: BeautifulSoup) -> str:
+    """Return the Ontario Encore number as a string if available."""
+    encore_img = draw_soup.find("img", {"src": "/images/logos/lottery-logos/ontario_encore.svg"})
+    if encore_img and encore_img.parent:
+        digits = [li.get_text(strip=True) for li in encore_img.parent.parent.select("ul li")]
+        return "".join(digits)
+    return ""
 
-				div = big_div.find(class_="encore-title")
-				result_object.set_extra(div.span.text)
 
-				div = soup.find(class_="breakdown-table")
-				rows = div.find_all("tr")
-				row = rows[1].find_all("td")
-				prize = row[1].text
-				result_object.set_prize(prize.strip())
+def get_max_millions(draw_soup: BeautifulSoup) -> list:
+    """Return a list of Max Millions combinations if present."""
+    results = []
+    wrapper = draw_soup.find("div", class_="maxMillionsResultsWrap")
+    if wrapper:
+        for ul in wrapper.select("div.maxMillionResults ul.balls"):
+            results.append([int(li.get_text(strip=True)) for li in ul.select("li")])
+    return results
 
-				div = soup.find(id="this-draw-max-results")
-				if div != None:
-					all_max = []
-					for item in div.find_all(class_="max-millions-result"):
-						one_max = get_result_from_balls(item.find(class_="balls"))
-						all_max.append(one_max)
-					result_object.set_maxi_combos(all_max)
-				result_object.save_result_to_db()
+def scan(start_year: int = 2025, end_year: int = 2009):
+    """Scan yearly result pages and store draw information in the database."""
+    clear()
+    for year in range(start_year, end_year - 1, -1):
+        year_url = f"{BASE_URL}/numbers/{year}"
+        soup = get_soup(year_url)
+        for row in soup.select("table.archiveResults tbody tr"):
+            cells = row.find_all("td")
+            if len(cells) != 3:
+                continue
+
+            link = cells[0].find("a")
+            if not link:
+                continue
+
+            date_obj = datetime.strptime(link.text.strip(), "%B %d %Y")
+            saved_date = date_obj.strftime("%Y-%m-%d")
+
+            numbers = [int(li.get_text(strip=True)) for li in cells[1].select("li")]
+            bonus = numbers.pop()
+            jackpot = cells[2].get_text(strip=True)
+
+            draw_soup = get_soup(BASE_URL + link["href"])
+            extra = get_extra(draw_soup)
+            max_combos = get_max_millions(draw_soup)
+
+            res = result.Result(saved_date)
+            res.set_winning_combo(numbers)
+            res.set_bonus(bonus)
+            res.set_extra(extra)
+            res.set_prize(jackpot)
+            if max_combos:
+                res.set_maxi_combos(max_combos)
+            res.save_result_to_db()
+
