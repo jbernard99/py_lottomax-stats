@@ -27,8 +27,8 @@ class AdvancedLottoMaxPredictor:
         indices = np.arange(n_draws)
         return np.exp(-self.alpha * (n_draws - 1 - indices))
 
-    def _number_probabilities(self, combos: List[List[int]]) -> np.ndarray:
-        """Return weighted probability for each number."""
+    def _number_probabilities(self, combos: List[List[int]], smoothing: float = 1e-6) -> np.ndarray:
+        """Return weighted probability for each number with smoothing."""
         n_draws = len(combos)
         weights = self._compute_weights(n_draws)
         counts = np.zeros(self.n_numbers, dtype=float)
@@ -36,6 +36,7 @@ class AdvancedLottoMaxPredictor:
             for num in draw:
                 if 1 <= num <= self.n_numbers:
                     counts[num - 1] += w
+        counts += smoothing  # ensure unseen numbers still get some mass
         return counts / counts.sum()
 
     def _pair_matrix(self, combos: List[List[int]]) -> np.ndarray:
@@ -52,13 +53,49 @@ class AdvancedLottoMaxPredictor:
             return pair_counts
         return pair_counts / pair_counts.sum()
 
+    def _triple_matrix(self, combos: List[List[int]], smoothing: float = 1e-6) -> np.ndarray:
+        """Return matrix of weighted triple frequencies.
+
+        The matrix is indexed by sorted triples (i < j < k) and normalised to
+        probabilities. A small ``smoothing`` term is added so unseen triples have
+        non-zero probability.
+        """
+        n_draws = len(combos)
+        weights = self._compute_weights(n_draws)
+        triple_counts = np.zeros(
+            (self.n_numbers, self.n_numbers, self.n_numbers), dtype=float
+        )
+        for draw, w in zip(combos, weights):
+            for a, b, c in combinations(draw, 3):
+                if (
+                    1 <= a <= self.n_numbers
+                    and 1 <= b <= self.n_numbers
+                    and 1 <= c <= self.n_numbers
+                ):
+                    i, j, k = sorted((a, b, c))
+                    triple_counts[i - 1, j - 1, k - 1] += w
+        triple_counts += smoothing
+        if triple_counts.sum() == 0:
+            return triple_counts
+        return triple_counts / triple_counts.sum()
+
     def _score_candidates(
-        self, remaining: np.ndarray, selected: List[int], num_probs: np.ndarray, pair_probs: np.ndarray
+        self,
+        remaining: np.ndarray,
+        selected: List[int],
+        num_probs: np.ndarray,
+        pair_probs: np.ndarray,
+        triple_probs: np.ndarray,
     ) -> np.ndarray:
         """Return probability scores for remaining numbers."""
         scores = num_probs[remaining - 1].copy()
         for s in selected:
             scores += pair_probs[remaining - 1, s - 1]
+        if len(selected) >= 2:
+            for a, b in combinations(selected, 2):
+                for idx, r in enumerate(remaining):
+                    i, j, k = sorted((int(r), a, b))
+                    scores[idx] += triple_probs[i - 1, j - 1, k - 1]
         # Normalise to probabilities
         if scores.sum() == 0:
             return np.ones_like(scores) / len(scores)
@@ -71,13 +108,16 @@ class AdvancedLottoMaxPredictor:
             raise ValueError("No historical data available")
         num_probs = self._number_probabilities(combos)
         pair_probs = self._pair_matrix(combos)
+        triple_probs = self._triple_matrix(combos)
         results = []
         rng = np.random.default_rng()
         for _ in range(n_sets):
             selected: List[int] = []
             remaining = np.arange(1, self.n_numbers + 1)
             for _ in range(k):
-                prob = self._score_candidates(remaining, selected, num_probs, pair_probs)
+                prob = self._score_candidates(
+                    remaining, selected, num_probs, pair_probs, triple_probs
+                )
                 choice = rng.choice(remaining, p=prob)
                 selected.append(int(choice))
                 remaining = remaining[remaining != choice]
